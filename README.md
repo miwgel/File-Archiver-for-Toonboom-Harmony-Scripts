@@ -11,6 +11,7 @@ A JavaScript/Qt-Script utility module that provides a wrapper around the 7-Zip c
 - Cross-platform support (Windows, macOS, Linux)
 - Automatic 7-Zip binary detection and download (Windows)
 - File filtering support
+- Two initialization modes: configuration object (recommended) or positional parameters (legacy)
 
 ## Requirements
 
@@ -33,17 +34,59 @@ var SevenZip = require("sevenzip.js").SevenZip;
 
 ## Usage
 
+### Configuration Object (Recommended)
+
+The recommended way to create a SevenZip instance is using a configuration object:
+
+```javascript
+var SevenZip = require("sevenzip.js").SevenZip;
+
+var archiver = new SevenZip({
+  sources: "/path/to/source/folder",
+  destination: "/path/to/archive.7z",
+  filter: "*.bak",              // Optional: exclude pattern
+  debug: false,                 // Optional: enable debug logging
+  onStart: function() {
+    MessageLog.trace("Started!");
+  },
+  onProgress: function(percent) {
+    MessageLog.trace("Progress: " + percent + "%");
+  },
+  onEnd: function(success) {
+    MessageLog.trace("Done! Success: " + success);
+  },
+  onError: function(error) {
+    MessageLog.trace("Error: " + error.message);
+  }
+});
+
+archiver.zipAsync();
+```
+
+### Configuration Object Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `sources` | string \| string[] | Source path(s) for compression, or archive path for extraction |
+| `destination` | string | Destination path for the archive or extraction folder |
+| `context` | Object | The `this` context for callback execution (optional) |
+| `filter` | string | Pattern to exclude files (e.g., "*.bak", "temp") |
+| `debug` | boolean | Enable debug output to MessageLog (default: false) |
+| `onStart` | function | Called when async operation starts |
+| `onProgress` | function(number) | Called with progress percentage (0-100) |
+| `onEnd` | function(boolean) | Called when operation ends with success status |
+| `onDebug` | function(string) | Called with stdout/stderr output |
+| `onError` | function(Error) | Called when an error occurs |
+
 ### Basic Synchronous Compression
 
 ```javascript
 var SevenZip = require("sevenzip.js").SevenZip;
 
-// Compress a folder
-var archiver = new SevenZip(
-  this,                           // Parent context
-  "/path/to/source/folder",       // Source path
-  "/path/to/destination.7z"       // Destination archive
-);
+var archiver = new SevenZip({
+  sources: "/path/to/source/folder",
+  destination: "/path/to/destination.7z"
+});
 
 var success = archiver.zip();
 if (success) {
@@ -58,12 +101,10 @@ if (success) {
 ```javascript
 var SevenZip = require("sevenzip.js").SevenZip;
 
-// Decompress an archive
-var archiver = new SevenZip(
-  this,                           // Parent context
-  "/path/to/archive.7z",          // Source archive
-  "/path/to/destination/folder"   // Destination folder
-);
+var archiver = new SevenZip({
+  sources: "/path/to/archive.7z",
+  destination: "/path/to/destination/folder"
+});
 
 var success = archiver.unzip();
 if (success) {
@@ -76,89 +117,19 @@ if (success) {
 ```javascript
 var SevenZip = require("sevenzip.js").SevenZip;
 
-function onStart() {
-  MessageLog.trace("Compression started!");
-}
-
-function onProgress(percent) {
-  MessageLog.trace("Progress: " + percent + "%");
-}
-
-function onEnd(success) {
-  MessageLog.trace("Compression " + (success ? "completed!" : "failed!"));
-}
-
-var archiver = new SevenZip(
-  this,                    // Parent context
-  ["/path/to/folder1",     // Multiple source paths (array)
-   "/path/to/folder2"],
-  "/path/to/archive.7z",   // Destination
-  onStart,                 // Process start callback
-  onProgress,              // Progress callback (0-100)
-  onEnd                    // Process end callback
-);
-
-archiver.zipAsync();
-```
-
-### Asynchronous Decompression
-
-```javascript
-var SevenZip = require("sevenzip.js").SevenZip;
-
-var archiver = new SevenZip(
-  this,
-  "/path/to/archive.7z",
-  "/path/to/destination",
-  function() { MessageLog.trace("Started!"); },
-  function(p) { MessageLog.trace(p + "%"); },
-  function(success) { MessageLog.trace("Done: " + success); }
-);
-
-archiver.unzipAsync();
-```
-
-### With File Filtering
-
-```javascript
-var SevenZip = require("sevenzip.js").SevenZip;
-
-// Exclude backup files from compression
-var archiver = new SevenZip(
-  this,
-  "/path/to/source",
-  "/path/to/archive.7z",
-  null,        // processStartCallback
-  null,        // progressCallback
-  null,        // processEndCallback
-  null,        // debugCallback
-  "backups"    // filter - excludes files/folders matching this pattern
-);
-
-archiver.zip();
-```
-
-### With Error Handling
-
-```javascript
-var SevenZip = require("sevenzip.js").SevenZip;
-
-function onError(error) {
-  MessageLog.trace("Error occurred: " + error.message);
-}
-
-var archiver = new SevenZip(
-  this,
-  "/path/to/source",
-  "/path/to/archive.7z",
-  null,        // processStartCallback
-  null,        // progressCallback
-  null,        // processEndCallback
-  null,        // debugCallback
-  null,        // filter
-  false,       // debug
-  onError      // errorCallback
-);
+var archiver = new SevenZip({
+  sources: ["/path/to/folder1", "/path/to/folder2"],
+  destination: "/path/to/archive.7z",
+  onStart: function() {
+    MessageLog.trace("Compression started!");
+  },
+  onProgress: function(percent) {
+    MessageLog.trace("Progress: " + percent + "%");
+  },
+  onEnd: function(success) {
+    MessageLog.trace("Compression " + (success ? "completed!" : "failed!"));
+  }
+});
 
 archiver.zipAsync();
 ```
@@ -166,43 +137,63 @@ archiver.zipAsync();
 ### Delete Source After Compression
 
 ```javascript
-var SevenZip = require("sevenzip.js").SevenZip;
-
-var archiver = new SevenZip(
-  this,
-  "/path/to/source",
-  "/path/to/archive.7z"
-);
+var archiver = new SevenZip({
+  sources: "/path/to/source",
+  destination: "/path/to/archive.7z"
+});
 
 // Pass true to delete source files after successful compression
 archiver.zipAsync(true);
 ```
 
+### With File Filtering
+
+```javascript
+var archiver = new SevenZip({
+  sources: "/path/to/source",
+  destination: "/path/to/archive.7z",
+  filter: "backups"  // Excludes files/folders matching this pattern
+});
+
+archiver.zip();
+```
+
 ### Debug Mode
+
+```javascript
+var archiver = new SevenZip({
+  sources: "/path/to/source",
+  destination: "/path/to/archive.7z",
+  debug: true  // Logs 7zip output to MessageLog
+});
+
+archiver.zip();
+```
+
+---
+
+## Legacy API (Positional Parameters)
+
+For backwards compatibility, the constructor also accepts positional parameters:
 
 ```javascript
 var SevenZip = require("sevenzip.js").SevenZip;
 
 var archiver = new SevenZip(
-  this,
-  "/path/to/source",
-  "/path/to/archive.7z",
-  null, null, null, null, null,
-  true    // Enable debug mode - logs 7zip output to MessageLog
+  this,                           // Parent context
+  "/path/to/source/folder",       // Source path
+  "/path/to/destination.7z",      // Destination archive
+  onStartCallback,                // Optional
+  onProgressCallback,             // Optional
+  onEndCallback,                  // Optional
+  onDebugCallback,                // Optional
+  "filterPattern",                // Optional
+  false,                          // debug (Optional)
+  onErrorCallback                 // Optional
 );
-
-archiver.zip();
 ```
 
-## API Reference
-
-### Constructor
-
-```javascript
-new SevenZip(parentContext, sources, destination, [processStartCallback],
-             [progressCallback], [processEndCallback], [debugCallback],
-             [filter], [debug], [errorCallback])
-```
+### Legacy Constructor Parameters
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -216,6 +207,10 @@ new SevenZip(parentContext, sources, destination, [processStartCallback],
 | `filter` | string | Pattern to exclude files (e.g., "*.bak", "temp") |
 | `debug` | boolean | Enable debug output to MessageLog (default: false) |
 | `errorCallback` | function(Error) | Called when an error occurs |
+
+---
+
+## API Reference
 
 ### Methods
 
