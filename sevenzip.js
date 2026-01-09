@@ -1,20 +1,40 @@
 /**
  * @file File zipper and unzipper utility for Toonboom Harmony Scripting Interface
- * @version 23.9
+ * @version 24.1
  * @copyright mihgehl < github.com/mihgehl >
  * @author mihgehl < github.com/mihgehl >
  */
 
 /**
+ * Creates a new SevenZip instance for file compression/decompression operations
  * @constructor
- * @param { parent } parentContext
- * @param { string } source Source path to be unzipped or compressed
- * @param { string } destination Destination path where the source will be unzipped or compressed
- * @param { processStartCallback } processStartCallback Optional: Function that gets called when async zipping or unzipping process is started
- * @param { progressCallback } progressCallback Optional: Function that gets called when async zipping or unzipping progress is updated
- * @param { processEndCallback } processEndCallback Optional: Function that gets called when async zipping or unzipping process ends
- * @param { string } filter Optional: For filtering out files or folders
- * @param { bool } debug Optional: Print debugging messages to MessageLog
+ * @param {Object} parentContext - The parent context for callback execution (usually 'this' from the caller)
+ * @param {string|string[]} sources - Source path(s) to be compressed or archive path to be extracted
+ * @param {string} destination - Destination path for the compressed archive or extraction folder
+ * @param {processStartCallback} [processStartCallback] - Called when async process starts
+ * @param {progressCallback} [progressCallback] - Called when async progress is updated (0-100)
+ * @param {processEndCallback} [processEndCallback] - Called when async process ends
+ * @param {debugCallback} [debugCallback] - Called with stdout/stderr output for debugging
+ * @param {string} [filter] - Filter pattern for including/excluding files (e.g., "*.txt", "backups")
+ * @param {boolean} [debug=false] - Enable debug output to MessageLog
+ * @param {errorCallback} [errorCallback] - Called when an error occurs during operation
+ * @throws {Error} If sources or destination are not provided
+ * @example
+ * // Synchronous compression
+ * var archiver = new SevenZip(this, "/path/to/folder", "/path/to/archive.7z");
+ * var success = archiver.zip();
+ *
+ * @example
+ * // Asynchronous compression with progress
+ * var archiver = new SevenZip(
+ *   this,
+ *   ["/path/to/folder1", "/path/to/folder2"],
+ *   "/path/to/archive.7z",
+ *   function() { MessageLog.trace("Started!"); },
+ *   function(progress) { MessageLog.trace("Progress: " + progress + "%"); },
+ *   function(success) { MessageLog.trace("Done! Success: " + success); }
+ * );
+ * archiver.zipAsync();
  */
 function SevenZip(
   parentContext,
@@ -25,16 +45,19 @@ function SevenZip(
   processEndCallback,
   debugCallback,
   filter,
-  debug
+  debug,
+  errorCallback
 ) {
   if (typeof parentContext === "undefined") var parentContext = null;
   if (typeof sources === "undefined") var sources = null;
   if (typeof destination === "undefined") var destination = null;
-  if (typeof processStartCallback === "undefined") var progressCallback = null;
+  if (typeof processStartCallback === "undefined") var processStartCallback = null;
+  if (typeof progressCallback === "undefined") var progressCallback = null;
   if (typeof processEndCallback === "undefined") var processEndCallback = null;
   if (typeof debugCallback === "undefined") var debugCallback = null;
   if (typeof filter === "undefined") var filter = undefined;
   if (typeof debug === "undefined") var debug = false;
+  if (typeof errorCallback === "undefined") var errorCallback = null;
 
   this.parentContext = parentContext;
   this.sources = sources;
@@ -45,23 +68,109 @@ function SevenZip(
   this.debugCallback = debugCallback;
   this.filter = filter;
   this.debug = debug;
+  this.errorCallback = errorCallback;
+
+  // Validate required parameters
+  this._validateParams();
 
   this.command = [];
   this.process = new QProcess();
+
+  // Store signal connection references for cleanup
+  this._connections = {
+    readyReadStdOut: null,
+    readyReadStdErr: null,
+    started: null,
+    finished: null
+  };
 }
 
 /**
- * Function that gets called when async zipping or unzipping process is started
+ * Disconnects all signal connections to prevent memory leaks
+ * Call this before reusing the process or when done
+ */
+SevenZip.prototype._disconnectSignals = function () {
+  try {
+    if (this._connections.readyReadStdOut) {
+      this.process.readyReadStandardOutput.disconnect(this, this._connections.readyReadStdOut);
+      this._connections.readyReadStdOut = null;
+    }
+    if (this._connections.readyReadStdErr) {
+      this.process.readyReadStandardError.disconnect(this, this._connections.readyReadStdErr);
+      this._connections.readyReadStdErr = null;
+    }
+    if (this._connections.started) {
+      this.process["started()"].disconnect(this, this._connections.started);
+      this._connections.started = null;
+    }
+    if (this._connections.finished) {
+      this.process["finished(int)"].disconnect(this, this._connections.finished);
+      this._connections.finished = null;
+    }
+  } catch (error) {
+    this.log("Error disconnecting signals: " + error);
+  }
+};
+
+/**
+ * Validates required parameters and throws errors for invalid inputs
+ * @private
+ */
+SevenZip.prototype._validateParams = function () {
+  // Validate sources
+  if (this.sources === null || this.sources === undefined) {
+    throw new Error("SevenZip: sources parameter is required");
+  }
+
+  // Validate destination
+  if (this.destination === null || this.destination === undefined || this.destination === "") {
+    throw new Error("SevenZip: destination parameter is required");
+  }
+
+  // Validate callbacks are functions if provided
+  var callbacks = [
+    { name: "processStartCallback", value: this.processStartCallback },
+    { name: "progressCallback", value: this.progressCallback },
+    { name: "processEndCallback", value: this.processEndCallback },
+    { name: "debugCallback", value: this.debugCallback },
+    { name: "errorCallback", value: this.errorCallback }
+  ];
+
+  for (var i = 0; i < callbacks.length; i++) {
+    var cb = callbacks[i];
+    if (cb.value !== null && cb.value !== undefined && typeof cb.value !== "function") {
+      throw new Error("SevenZip: " + cb.name + " must be a function");
+    }
+  }
+};
+
+/**
+ * Called when async zipping or unzipping process is started
  * @callback processStartCallback
  */
+
 /**
- * Function that gets called when async zipping or unzipping progress is updated
+ * Called when async zipping or unzipping progress is updated
  * @callback progressCallback
- * @param {int} progressValue Current progress percentage
+ * @param {number} progressValue - Current progress percentage (0-100)
  */
+
 /**
- * Function that gets called when async zipping or unzipping process ends
- * @callback processStartCallback
+ * Called when async zipping or unzipping process ends
+ * @callback processEndCallback
+ * @param {boolean} success - Whether the operation completed successfully
+ */
+
+/**
+ * Called with debug output from the process
+ * @callback debugCallback
+ * @param {string} output - The stdout or stderr output from 7zip
+ */
+
+/**
+ * Called when an error occurs during operation
+ * @callback errorCallback
+ * @param {Error} error - The error that occurred
  */
 
 /**
@@ -169,8 +278,8 @@ Object.defineProperty(SevenZip.prototype, "binPath", {
 });
 
 var sizeCalculator = function (sourcePath) {
-  totalSize = 0;
-  sourceInfo = new QFileInfo(sourcePath);
+  var totalSize = 0;
+  var sourceInfo = new QFileInfo(sourcePath);
 
   if (sourceInfo.isFile()) {
     totalSize = sourceInfo.size();
@@ -187,13 +296,21 @@ var sizeCalculator = function (sourcePath) {
 
 /**
  * Compresses a file or directory without blocking the UI
+ * @param {boolean} deleteSource Optional: If true, deletes source files after successful compression
  */
 SevenZip.prototype.zipAsync = function (deleteSource) {
+  var self = this;
+
   try {
+    // Disconnect any previous signal connections to prevent duplicates
+    this._disconnectSignals();
+
     this.command = ["a", this.destination];
 
-    for (var source in this.sources) {
-      this.command.push(this.sources[source]);
+    // Normalize sources to array and add to command
+    var sourcesArray = Array.isArray(this.sources) ? this.sources : [this.sources];
+    for (var i = 0; i < sourcesArray.length; i++) {
+      this.command.push(sourcesArray[i]);
     }
 
     this.command.push(
@@ -204,88 +321,113 @@ SevenZip.prototype.zipAsync = function (deleteSource) {
       this.command.push("-xr!" + this.filter);
     }
 
-    // Comment this section for receiving debug messages from the process
-    if (!this.debug && typeof this.progressCallback !== "undefined") {
-      this.process.readyReadStandardOutput.connect(this, function () {
-        var output7z = new QTextStream(this.process.readAllStandardOutput())
+    // Progress callback for stdout
+    if (!this.debug && typeof this.progressCallback === "function") {
+      this._connections.readyReadStdOut = function () {
+        var output7z = new QTextStream(self.process.readAllStandardOutput())
           .readAll()
           .match(/\d+(?:\.\d+)?%/);
-        if (isNaN(output7z)) {
-          // Passes the zipping progress as a command to a callback (progressCallback) passed on by the user as a argument
-          this.progressCallback.call(this.parentContext, parseInt(output7z));
+        if (output7z && output7z.length > 0) {
+          self.progressCallback.call(self.parentContext, parseInt(output7z[0]));
         }
-      });
+      };
+      this.process.readyReadStandardOutput.connect(this, this._connections.readyReadStdOut);
     }
 
-    // Call a function from outside when the process is started
-    if (typeof this.processStartCallback !== "undefined") {
-      this.process["started()"].connect(this, function () {
-        this.processStartCallback.call(this.parentContext);
-      });
+    // Process started callback
+    if (typeof this.processStartCallback === "function") {
+      this._connections.started = function () {
+        self.processStartCallback.call(self.parentContext);
+      };
+      this.process["started()"].connect(this, this._connections.started);
     }
 
-    // Call a function from outside when the process ends
-    if (typeof this.processEndCallback !== "undefined") {
-      this.process["finished(int)"].connect(this, function () {
-        this.processEndCallback.call(
-          this.parentContext,
-          new QFile(this.destination).exists()
-        );
-        if (deleteSource) {
-          for (var source in this.sources) {
-            var pathToRemove = this.sources[source];
+    // Process finished callback
+    if (typeof this.processEndCallback === "function" || deleteSource) {
+      this._connections.finished = function () {
+        var success = new QFile(self.destination).exists();
 
+        // Clean up signal connections
+        self._disconnectSignals();
+
+        if (typeof self.processEndCallback === "function") {
+          self.processEndCallback.call(self.parentContext, success);
+        }
+
+        if (deleteSource && success) {
+          for (var j = 0; j < sourcesArray.length; j++) {
+            var pathToRemove = sourcesArray[j];
             var pathInfo = new QFileInfo(pathToRemove);
 
             if (pathInfo.isDir()) {
-              MessageLog.trace("Removing folder: " + pathToRemove);
+              self.log("Removing folder: " + pathToRemove);
               new QDir(pathToRemove).removeRecursively();
             } else if (pathInfo.isFile()) {
-              MessageLog.trace("Removing file: " + pathToRemove);
+              self.log("Removing file: " + pathToRemove);
               new QFile(pathToRemove).remove();
-            } else {
-              throw new Error("Path not found");
             }
           }
         }
-      });
+      };
+      this.process["finished(int)"].connect(this, this._connections.finished);
     }
 
-    if (typeof this.debugCallback !== "undefined") {
-      this.process.readyReadStandardOutput.connect(this, function () {
-        var currentStdOut = new QTextStream(
-          this.process.readAllStandardOutput()
-        ).readAll();
-        this.debugCallback.call(this.parentContext, currentStdOut);
-      });
-      this.process.readyReadStandardError.connect(this, function () {
+    // Debug callback for stdout and stderr
+    if (typeof this.debugCallback === "function") {
+      if (!this._connections.readyReadStdOut) {
+        this._connections.readyReadStdOut = function () {
+          var currentStdOut = new QTextStream(
+            self.process.readAllStandardOutput()
+          ).readAll();
+          self.debugCallback.call(self.parentContext, currentStdOut);
+        };
+        this.process.readyReadStandardOutput.connect(this, this._connections.readyReadStdOut);
+      }
+
+      this._connections.readyReadStdErr = function () {
         var currentErrOut = new QTextStream(
-          this.process.readAllStandardError()
+          self.process.readAllStandardError()
         ).readAll();
-        this.debugCallback.call(this.parentContext, currentErrOut);
-      });
+        self.debugCallback.call(self.parentContext, currentErrOut);
+      };
+      this.process.readyReadStandardError.connect(this, this._connections.readyReadStdErr);
     }
 
     this.process.start(this.binPath, this.command);
   } catch (error) {
     this.log(error);
+    if (typeof this.errorCallback === "function") {
+      this.errorCallback.call(this.parentContext, error);
+    }
   }
 };
 
 /**
  * Compresses a file or directory blocking the UI
+ * @returns {boolean} True if compression was successful
  */
 SevenZip.prototype.zip = function () {
   try {
-    this.command = [
-      "a",
-      this.destination,
-      this.sources + "/*", // /* is for avoding 7zip to zip the outer folder, TODO: needs to be tested with files
-      // "-xr!backups",
-      "-bsp1",
-      // "-bse1",
-      // "-bso1",
-    ];
+    this.command = ["a", this.destination];
+
+    // Normalize sources to array and add to command
+    var sourcesArray = Array.isArray(this.sources) ? this.sources : [this.sources];
+    for (var i = 0; i < sourcesArray.length; i++) {
+      // Add /* suffix for directories to avoid zipping the outer folder
+      var sourcePath = sourcesArray[i];
+      var sourceInfo = new QFileInfo(sourcePath);
+      if (sourceInfo.isDir()) {
+        this.command.push(sourcePath + "/*");
+      } else {
+        this.command.push(sourcePath);
+      }
+    }
+
+    this.command.push("-bsp1");
+
+    if (this.filter !== undefined && this.filter !== "") {
+      this.command.push("-xr!" + this.filter);
+    }
 
     if (this.debug) {
       this.process.readyReadStandardOutput.connect(this, function () {
@@ -304,8 +446,63 @@ SevenZip.prototype.zip = function () {
 
     this.process.start(this.binPath, this.command);
     this.process.waitForFinished(10000);
+
+    return new QFile(this.destination).exists();
   } catch (error) {
     this.log(error);
+    if (typeof this.errorCallback === "function") {
+      this.errorCallback.call(this.parentContext, error);
+    }
+    return false;
+  }
+};
+
+/**
+ * Decompresses a file blocking the UI
+ * @returns {boolean} True if decompression was successful
+ */
+SevenZip.prototype.unzip = function () {
+  try {
+    // For unzip, sources should be a single archive path (string)
+    var sourcePath = Array.isArray(this.sources) ? this.sources[0] : this.sources;
+
+    this.command = [
+      "x",
+      "-y", // Overwrites files and folders by default
+      sourcePath,
+      "-o" + this.destination,
+      "-bsp1",
+    ];
+
+    if (this.filter !== undefined && this.filter !== "") {
+      this.command.push(this.filter);
+    }
+
+    if (this.debug) {
+      this.process.readyReadStandardOutput.connect(this, function () {
+        try {
+          this.log(
+            new QTextStream(this.process.readAllStandardOutput()).readAll()
+          );
+          this.log(
+            new QTextStream(this.process.readAllStandardError()).readAll()
+          );
+        } catch (error) {
+          this.log(error);
+        }
+      });
+    }
+
+    this.process.start(this.binPath, this.command);
+    this.process.waitForFinished(10000);
+
+    return new QDir(this.destination).exists();
+  } catch (error) {
+    this.log(error);
+    if (typeof this.errorCallback === "function") {
+      this.errorCallback.call(this.parentContext, error);
+    }
+    return false;
   }
 };
 
@@ -313,68 +510,87 @@ SevenZip.prototype.zip = function () {
  * Decompresses a file without blocking the UI
  */
 SevenZip.prototype.unzipAsync = function () {
+  var self = this;
+
   try {
-    // Macos seems to have an older version of 7za, so the output folder command -o shouldn't have an space before the path
+    // Disconnect any previous signal connections to prevent duplicates
+    this._disconnectSignals();
+
+    // For unzip, sources should be a single archive path (string)
+    var sourcePath = Array.isArray(this.sources) ? this.sources[0] : this.sources;
+
+    // Macos seems to have an older version of 7za, so the output folder command -o shouldn't have a space before the path
     this.command = [
       "x",
-      "-y", // Overwrites files and folders by default. TODO:
-      this.sources,
+      "-y", // Overwrites files and folders by default
+      sourcePath,
       "-o" + this.destination,
-      "-bsp1", // Macos and tbh22 needs -bsp1 to show progress | Needs testing on windows
-      // "-aoa",
-      // "-r",
+      "-bsp1", // Macos and tbh22 needs -bsp1 to show progress
     ];
 
     if (this.filter !== undefined && this.filter !== "") {
       this.command.push(this.filter);
     }
 
-    // Comment this section for receiving debug messages from the process
-    if (!this.debug && typeof this.progressCallback !== "undefined") {
-      this.process.readyReadStandardOutput.connect(this, function () {
-        var output7z = new QTextStream(this.process.readAllStandardOutput())
+    // Progress callback for stdout
+    if (!this.debug && typeof this.progressCallback === "function") {
+      this._connections.readyReadStdOut = function () {
+        var output7z = new QTextStream(self.process.readAllStandardOutput())
           .readAll()
           .match(/\d+(?:\.\d+)?%/);
-        if (isNaN(output7z)) {
-          // Passes the zipping progress as a command to a callback (progressCallback) passed on by the user as a argument
-          this.progressCallback.call(this.parentContext, parseInt(output7z));
+        if (output7z && output7z.length > 0) {
+          self.progressCallback.call(self.parentContext, parseInt(output7z[0]));
         }
-      });
+      };
+      this.process.readyReadStandardOutput.connect(this, this._connections.readyReadStdOut);
     }
 
-    // Call a function from outside when the process is started
-    if (typeof this.processStartCallback !== "undefined") {
-      this.process["started()"].connect(this, function () {
-        this.processStartCallback.call(this.parentContext);
-      });
+    // Process started callback
+    if (typeof this.processStartCallback === "function") {
+      this._connections.started = function () {
+        self.processStartCallback.call(self.parentContext);
+      };
+      this.process["started()"].connect(this, this._connections.started);
     }
 
-    // Call a function from outside when the process ends
-    if (typeof this.processEndCallback !== "undefined") {
-      this.process["finished(int)"].connect(this, function () {
-        this.processEndCallback.call(this.parentContext);
-      });
+    // Process finished callback
+    if (typeof this.processEndCallback === "function") {
+      this._connections.finished = function () {
+        // Clean up signal connections
+        self._disconnectSignals();
+
+        self.processEndCallback.call(self.parentContext, new QDir(self.destination).exists());
+      };
+      this.process["finished(int)"].connect(this, this._connections.finished);
     }
 
-    // This requires progressCallback section to be commented out
+    // Debug output
     if (this.debug) {
-      this.process.readyReadStandardOutput.connect(this, function () {
-        var currentStdOut = new QTextStream(
-          this.process.readAllStandardOutput()
-        ).readAll();
-        this.log(currentStdOut);
-      });
-      this.process.readyReadStandardError.connect(this, function () {
+      if (!this._connections.readyReadStdOut) {
+        this._connections.readyReadStdOut = function () {
+          var currentStdOut = new QTextStream(
+            self.process.readAllStandardOutput()
+          ).readAll();
+          self.log(currentStdOut);
+        };
+        this.process.readyReadStandardOutput.connect(this, this._connections.readyReadStdOut);
+      }
+
+      this._connections.readyReadStdErr = function () {
         var currentErrOut = new QTextStream(
-          this.process.readAllStandardError()
+          self.process.readAllStandardError()
         ).readAll();
-        this.log(currentErrOut);
-      });
+        self.log(currentErrOut);
+      };
+      this.process.readyReadStandardError.connect(this, this._connections.readyReadStdErr);
     }
 
     this.process.start(this.binPath, this.command);
   } catch (error) {
     this.log(error);
+    if (typeof this.errorCallback === "function") {
+      this.errorCallback.call(this.parentContext, error);
+    }
   }
 };
 
